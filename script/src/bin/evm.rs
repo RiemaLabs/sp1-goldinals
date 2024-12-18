@@ -10,24 +10,38 @@
 //! RUST_LOG=info cargo run --release --bin evm -- --system plonk
 //! ```
 
-use alloy_sol_types::SolType;
 use clap::{Parser, ValueEnum};
-use fibonacci_lib::PublicValuesStruct;
+use rand::Rng;
+use rs_merkle::{Hasher, MerkleTree};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sp1_sdk::{
     include_elf, HashableKey, ProverClient, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
 };
 use std::path::PathBuf;
+/// The ELF file for the Merkle Tree program
+pub const MERKLE_ELF: &[u8] = include_elf!("goldinals-merkle-tree");
 
-/// The ELF (executable and linkable format) file for the Succinct RISC-V zkVM.
-pub const FIBONACCI_ELF: &[u8] = include_elf!("fibonacci-program");
+#[derive(Clone)]
+struct Sha256Hasher;
+
+impl Hasher for Sha256Hasher {
+    type Hash = [u8; 32];
+
+    fn hash(data: &[u8]) -> Self::Hash {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(data);
+        hasher.finalize().into()
+    }
+}
 
 /// The arguments for the EVM command.
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct EVMArgs {
-    #[clap(long, default_value = "20")]
-    n: u32,
+    #[clap(long, default_value = "40000000")]
+    total_leaves: usize,
     #[clap(long, value_enum, default_value = "groth16")]
     system: ProofSystem,
 }
@@ -42,10 +56,10 @@ enum ProofSystem {
 /// A fixture that can be used to test the verification of SP1 zkVM proofs inside Solidity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SP1FibonacciProofFixture {
-    a: u32,
-    b: u32,
-    n: u32,
+struct SP1MerkleProofFixture {
+    root: String,
+    leaf: String,
+    is_valid: bool,
     vkey: String,
     public_values: String,
     proof: String,
@@ -62,13 +76,32 @@ fn main() {
     let client = ProverClient::new();
 
     // Setup the program.
-    let (pk, vk) = client.setup(FIBONACCI_ELF);
+    let (pk, vk) = client.setup(MERKLE_ELF);
 
-    // Setup the inputs.
+    let leaves: Vec<[u8; 32]> = (0..args.total_leaves)
+        .map(|i| {
+            let mut hasher = Sha256::new();
+            hasher.update(i.to_le_bytes());
+            hasher.finalize().into()
+        })
+        .collect();
+
+    let tree = MerkleTree::<Sha256Hasher>::from_leaves(&leaves);
+    let root = tree.root().expect("Failed to get root");
+    let leaf_index = rand::thread_rng().gen_range(0..args.total_leaves);
+    let leaf = leaves[leaf_index];
+    let proof = tree.proof(&[leaf_index]);
+    let proof_bytes = proof.to_bytes();
+
+    // Setup the inputs
     let mut stdin = SP1Stdin::new();
-    stdin.write(&args.n);
+    stdin.write(&root);
+    stdin.write(&leaf);
+    stdin.write(&proof_bytes);
+    stdin.write(&leaf_index);
+    stdin.write(&args.total_leaves);
 
-    println!("n: {}", args.n);
+    println!("Total Leaves: {}", args.total_leaves);
     println!("Proof System: {:?}", args.system);
 
     // Generate the proof based on the selected proof system.
@@ -87,37 +120,22 @@ fn create_proof_fixture(
     vk: &SP1VerifyingKey,
     system: ProofSystem,
 ) {
-    // Deserialize the public values.
-    let bytes = proof.public_values.as_slice();
-    let PublicValuesStruct { n, a, b } = PublicValuesStruct::abi_decode(bytes, false).unwrap();
+    let output = proof.public_values.as_slice();
+    let root = &output[0..32];
+    let leaf = &output[32..64];
+    let is_valid = output[64] != 0;
 
-    // Create the testing fixture so we can test things end-to-end.
-    let fixture = SP1FibonacciProofFixture {
-        a,
-        b,
-        n,
+    // Create the testing fixture
+    let fixture = SP1MerkleProofFixture {
+        root: format!("0x{}", hex::encode(root)),
+        leaf: format!("0x{}", hex::encode(leaf)),
+        is_valid,
         vkey: vk.bytes32().to_string(),
-        public_values: format!("0x{}", hex::encode(bytes)),
+        public_values: format!("0x{}", hex::encode(output)),
         proof: format!("0x{}", hex::encode(proof.bytes())),
     };
 
-    // The verification key is used to verify that the proof corresponds to the execution of the
-    // program on the given input.
-    //
-    // Note that the verification key stays the same regardless of the input.
-    println!("Verification Key: {}", fixture.vkey);
-
-    // The public values are the values which are publicly committed to by the zkVM.
-    //
-    // If you need to expose the inputs or outputs of your program, you should commit them in
-    // the public values.
-    println!("Public Values: {}", fixture.public_values);
-
-    // The proof proves to the verifier that the program was executed with some inputs that led to
-    // the give public values.
-    println!("Proof Bytes: {}", fixture.proof);
-
-    // Save the fixture to a file.
+    // Save the fixture
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contracts/src/fixtures");
     std::fs::create_dir_all(&fixture_path).expect("failed to create fixture path");
     std::fs::write(
@@ -125,4 +143,11 @@ fn create_proof_fixture(
         serde_json::to_string_pretty(&fixture).unwrap(),
     )
     .expect("failed to write fixture");
+
+    println!("Merkle Root: {}", fixture.root);
+    println!("Leaf: {}", fixture.leaf);
+    println!("Is Valid: {}", fixture.is_valid);
+    println!("Verification Key: {}", fixture.vkey);
+    println!("Public Values: {}", fixture.public_values);
+    println!("Proof Bytes: {}", fixture.proof);
 }

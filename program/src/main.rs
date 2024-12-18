@@ -1,30 +1,38 @@
-//! A simple program that takes a number `n` as input, and writes the `n-1`th and `n`th fibonacci
-//! number as an output.
-
-// These two lines are necessary for the program to properly compile.
-//
-// Under the hood, we wrap your main function with some extra code so that it behaves properly
-// inside the zkVM.
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 
-use alloy_sol_types::SolType;
-use fibonacci_lib::{fibonacci, PublicValuesStruct};
+use rs_merkle::{Hasher, MerkleProof};
+
+#[derive(Clone)]
+struct Sha256Hasher;
+
+impl Hasher for Sha256Hasher {
+    type Hash = [u8; 32];
+
+    fn hash(data: &[u8]) -> Self::Hash {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(data);
+        hasher.finalize().into()
+    }
+}
 
 pub fn main() {
-    // Read an input to the program.
-    //
-    // Behind the scenes, this compiles down to a custom system call which handles reading inputs
-    // from the prover.
-    let n = sp1_zkvm::io::read::<u32>();
+    let root: [u8; 32] = sp1_zkvm::io::read();
+    let leaf: [u8; 32] = sp1_zkvm::io::read();
+    let proof_bytes: Vec<u8> = sp1_zkvm::io::read();
+    let leaf_index: usize = sp1_zkvm::io::read();
+    let total_leaves: usize = sp1_zkvm::io::read();
 
-    // Compute the n'th fibonacci number using a function from the workspace lib crate.
-    let (a, b) = fibonacci(n);
+    let proof =
+        MerkleProof::<Sha256Hasher>::from_bytes(&proof_bytes).expect("Failed to parse proof");
 
-    // Encode the public values of the program.
-    let bytes = PublicValuesStruct::abi_encode(&PublicValuesStruct { n, a, b });
+    let is_valid = proof.verify(root, &[leaf_index], &[leaf], total_leaves);
 
-    // Commit to the public values of the program. The final proof will have a commitment to all the
-    // bytes that were committed to.
-    sp1_zkvm::io::commit_slice(&bytes);
+    let mut output = Vec::new();
+    output.extend_from_slice(&root);
+    output.extend_from_slice(&leaf);
+    output.push(is_valid as u8);
+
+    sp1_zkvm::io::commit_slice(&output);
 }

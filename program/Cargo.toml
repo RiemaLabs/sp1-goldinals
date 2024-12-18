@@ -1,9 +1,10 @@
 [package]
 version = "0.1.0"
-name = "fibonacci-program"
+name = "goldinals-merkle-tree"
 edition = "2021"
 
 [dependencies]
 alloy-sol-types = { workspace = true }
+rs_merkle = { version = "1.4", default-features = false }
+sha2 = "0.10.8"
 sp1-zkvm = "3.0.0-rc4"
-fibonacci-lib = { path = "../lib" }

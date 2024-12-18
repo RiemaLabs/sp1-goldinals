@@ -1,11 +1,11 @@
 [package]
 version = "0.1.0"
-name = "fibonacci-script"
+name = "goldinals-script"
 edition = "2021"
-default-run = "fibonacci"
+default-run = "goldinals"
 
 [[bin]]
-name = "fibonacci"
+name = "goldinals"
 path = "src/bin/main.rs"
 
 [[bin]]
@@ -20,7 +20,8 @@ clap = { version = "4.0", features = ["derive", "env"] }
 tracing = "0.1.40"
 hex = "0.4.3"
 alloy-sol-types = { workspace = true }
-fibonacci-lib = { path = "../lib" }
-
+rs_merkle = "1.4"
+sha2 = "0.10"
+rand = "0.8"
 [build-dependencies]
 sp1-helper = "3.0.0"

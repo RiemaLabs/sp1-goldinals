@@ -10,13 +10,28 @@
 //! RUST_LOG=info cargo run --release -- --prove
 //! ```
 
-use alloy_sol_types::SolType;
 use clap::Parser;
-use fibonacci_lib::PublicValuesStruct;
+use rand::Rng;
+use rs_merkle::{Hasher, MerkleTree};
+use sha2::{Digest, Sha256};
 use sp1_sdk::{include_elf, ProverClient, SP1Stdin};
 
-/// The ELF (executable and linkable format) file for the Succinct RISC-V zkVM.
-pub const FIBONACCI_ELF: &[u8] = include_elf!("fibonacci-program");
+/// The ELF file for the Merkle Tree program
+pub const MERKLE_ELF: &[u8] = include_elf!("goldinals-merkle-tree");
+
+#[derive(Clone)]
+struct Sha256Hasher;
+
+impl Hasher for Sha256Hasher {
+    type Hash = [u8; 32];
+
+    fn hash(data: &[u8]) -> Self::Hash {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(data);
+        hasher.finalize().into()
+    }
+}
 
 /// The arguments for the command.
 #[derive(Parser, Debug)]
@@ -28,8 +43,8 @@ struct Args {
     #[clap(long)]
     prove: bool,
 
-    #[clap(long, default_value = "20")]
-    n: u32,
+    #[clap(long, default_value = "40000000")]
+    total_leaves: usize,
 }
 
 fn main() {
@@ -47,34 +62,49 @@ fn main() {
     // Setup the prover client.
     let client = ProverClient::new();
 
-    // Setup the inputs.
-    let mut stdin = SP1Stdin::new();
-    stdin.write(&args.n);
+    // Setup the inputs
+    let leaves: Vec<[u8; 32]> = (0..args.total_leaves)
+        .map(|i| {
+            let mut hasher = Sha256::new();
+            hasher.update(i.to_le_bytes());
+            hasher.finalize().into()
+        })
+        .collect();
 
-    println!("n: {}", args.n);
+    let tree = MerkleTree::<Sha256Hasher>::from_leaves(&leaves);
+    let root = tree.root().expect("Failed to get root");
+    let leaf_index = rand::thread_rng().gen_range(0..args.total_leaves);
+    let leaf = leaves[leaf_index];
+    let proof = tree.proof(&[leaf_index]);
+    let proof_bytes = proof.to_bytes();
+
+    // Setup the inputs
+    let mut stdin = SP1Stdin::new();
+    stdin.write(&root);
+    stdin.write(&leaf);
+    stdin.write(&proof_bytes);
+    stdin.write(&leaf_index);
+    stdin.write(&args.total_leaves);
+
+    println!("Total Leaves: {}", args.total_leaves);
 
     if args.execute {
         // Execute the program
-        let (output, report) = client.execute(FIBONACCI_ELF, stdin).run().unwrap();
+        let (output, report) = client.execute(MERKLE_ELF, stdin).run().unwrap();
         println!("Program executed successfully.");
 
-        // Read the output.
-        let decoded = PublicValuesStruct::abi_decode(output.as_slice(), true).unwrap();
-        let PublicValuesStruct { n, a, b } = decoded;
-        println!("n: {}", n);
-        println!("a: {}", a);
-        println!("b: {}", b);
+        // Read the output
+        let root = &output.as_slice()[0..32];
+        let leaf = &output.as_slice()[32..64];
+        let is_valid = output.as_slice()[64] != 0;
 
-        let (expected_a, expected_b) = fibonacci_lib::fibonacci(n);
-        assert_eq!(a, expected_a);
-        assert_eq!(b, expected_b);
-        println!("Values are correct!");
-
-        // Record the number of cycles executed.
+        println!("Merkle Root: 0x{}", hex::encode(root));
+        println!("Leaf: 0x{}", hex::encode(leaf));
+        println!("Is Valid: {}", is_valid);
         println!("Number of cycles: {}", report.total_instruction_count());
     } else {
         // Setup the program for proving.
-        let (pk, vk) = client.setup(FIBONACCI_ELF);
+        let (pk, vk) = client.setup(MERKLE_ELF);
 
         // Generate the proof
         let proof = client
